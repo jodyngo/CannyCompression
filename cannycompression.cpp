@@ -6,6 +6,8 @@
 #include <utility>
 #include <set>
 #include <string>
+#include <thread>
+#include <functional>
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -16,12 +18,15 @@ using namespace std;
 #define CANNY_THRESHOLD 90
 #define CANNY_RATIO 3
 #define SQUARE_SIZE 8
+#define ROI_SIZE_LIMIT 200
 
 Mat cannyEdgeDetection(Mat input_matrix);
 void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix);
 int totalVals(Mat &matrix, int chanSum = -1);
 void formClusters(set<pair<int, int> > *top_left_points, vector<set<pair<int,int> > >  *known_clusters);
 void updateCluster(pair<int,int> point, set<pair<int,int> > *cluster);
+void downSampleMat(Mat input_matrix);
+void setChannel(Mat &mat, unsigned int channel, unsigned char value);
 
 // Input: filename compression_level display
 int main(int argc, char** argv)
@@ -40,7 +45,15 @@ int main(int argc, char** argv)
     }
     int compression_level = atoi(argv[2]);
 
-    // Create another matrix of the same sixe and type for the output
+    // Timing
+    double t = (double)getTickCount();
+
+    // Pad the source image so that the square size fits without missing spots
+    int pad_down = source_image.size().height % SQUARE_SIZE;
+    int pad_right = source_image.size().width % SQUARE_SIZE;
+    copyMakeBorder(source_image, source_image, 0, pad_down, 0, pad_right, BORDER_REPLICATE);
+
+    // Create another matrix of the same size and type for the output
     // of the Canny filter
     Mat processed_image;
     processed_image.create(source_image.size(), source_image.type());
@@ -52,8 +65,43 @@ int main(int argc, char** argv)
     // Perform the edge-detection
     processed_image = cannyEdgeDetection(source_grey);
 
-    // Highlight regions of interest
-    drawRegionsOfInterest(processed_image, source_image);
+    // Highlight regions of interest on 4 threads
+    int r = processed_image.rows;
+    int c = processed_image.cols;
+    cout << r << c << endl;
+    int adj_r = 0;
+    int adj_c = 0;
+    if (r % 2 == 0)
+        adj_r = 1;
+    if (c % 2 == 0)
+        adj_c = 1;
+
+    Mat proc1 = processed_image(Rect(0,0,adj_c+c/2,adj_r+r/2));
+    Mat src1 = source_image(Rect(0,0,c/2,r/2));
+    auto regionHandle1 = bind(drawRegionsOfInterest, proc1, src1);
+
+    Mat proc2 = processed_image(Rect(c/2,0,c/2,adj_r+r/2));
+    Mat src2 = source_image(Rect(c/2,0,c/2,r/2));
+    auto regionHandle2 = bind(drawRegionsOfInterest, proc2, src2);
+
+    Mat proc3 = processed_image(Rect(0,r/2,adj_c+c/2,r/2));
+    Mat src3 = source_image(Rect(0,r/2,c/2,r/2));
+    auto regionHandle3 = bind(drawRegionsOfInterest, proc3, src3);
+
+    Mat proc4 = processed_image(Rect(c/2,r/2,c/2,r/2));
+    Mat src4 = source_image(Rect(c/2,r/2,c/2,r/2));
+    auto regionHandle4 = bind(drawRegionsOfInterest, proc4, src4);
+
+    thread regionThread1 (regionHandle1);
+    thread regionThread2 (regionHandle2);
+    thread regionThread3 (regionHandle3);
+    thread regionThread4 (regionHandle4);
+
+
+    regionThread1.join();
+    regionThread2.join();
+    regionThread3.join();
+    regionThread4.join();
 
     // Compress and write image
     vector<int> compVec = {CV_IMWRITE_JPEG_QUALITY, compression_level};
@@ -62,9 +110,11 @@ int main(int argc, char** argv)
     image_name.insert(i, "_COMPRESSED");
     imwrite(image_name, source_image, compVec);
 
-    string window_name = "window";
-    namedWindow( window_name, CV_WINDOW_AUTOSIZE );
-    imshow(window_name, processed_image);
+    t = ((double)getTickCount() - t)/getTickFrequency();
+    std::cout << "Processing time: " << t << " s."<< std::endl;
+
+    namedWindow("Processed", WINDOW_AUTOSIZE);
+    imshow("Processed", source_image);
 
     waitKey(0);
     return 0;
@@ -103,12 +153,21 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
             Mat section = proc_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
             int sub_total = totalVals(section);
             // TODO: Test different cutoff values from 10
-            int section_weight = (1000/SQUARE_SIZE)*(255*sub_total)/total;
+            int section_weight;
+            if (total > 0)
+                section_weight = (1000/SQUARE_SIZE)*(255*sub_total)/total;
+            else
+                section_weight = 0;
             if (section_weight > 255)
                 section_weight = 255;
             if (section_weight > 10) // Region of interest
             {
                 top_left_points_of_interest.insert({i,j});
+            }
+            else
+            {
+                Mat source_section = disp_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
+                downSampleMat(source_section);
             }
         }
     }
@@ -135,8 +194,8 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
             max_x = max(max_x, pixel_point->first);
             max_y = max(max_y, pixel_point->second);
         }
-        if (!(max_x - min_x > 200 || max_y - min_y > 200))
-            rectangle(proc_matrix, Point(min_x, min_y), Point(max_x, max_y), Scalar(255,0,255), 1);
+        if (!(max_x - min_x > ROI_SIZE_LIMIT || max_y - min_y > ROI_SIZE_LIMIT))
+            rectangle(disp_matrix, Point(min_x, min_y), Point(max_x, max_y), Scalar(9,9,179), 1);
     }
 }
 
@@ -244,4 +303,40 @@ void updateCluster(pair<int,int> point, set<pair<int,int> > *cluster)
     cluster->insert({x + SQUARE_SIZE,y});
     cluster->insert({x,y + SQUARE_SIZE});
     cluster->insert({x + SQUARE_SIZE,y + SQUARE_SIZE});
+}
+
+void downSampleMat(Mat input_matrix)
+{
+    int height = input_matrix.size().height;
+    int width = input_matrix.size().width;
+
+    long totalB = totalVals(input_matrix, 0);
+    long totalG = totalVals(input_matrix, 1);
+    long totalR = totalVals(input_matrix, 2);
+
+    int avgColourB = totalB/(height*width);
+    int avgColourG = totalG/(height*width);
+    int avgColourR = totalR/(height*width);
+
+    setChannel(input_matrix, 0, avgColourB);
+    setChannel(input_matrix, 1, avgColourG);
+    setChannel(input_matrix, 2, avgColourR);
+}
+
+void setChannel(Mat &mat, unsigned int channel, unsigned char value)
+{
+    // Set all values in the input matrix to a value
+    if (mat.channels() < channel + 1)
+        return;
+
+    const int cols = mat.cols;
+    const int step = mat.channels();
+    const int rows = mat.rows;
+    for (int y = 0; y < rows; y++)
+    {
+        unsigned char *p_row = mat.ptr(y) + channel;
+        unsigned char *row_end = p_row + cols*step;
+        for (; p_row != row_end; p_row += step)
+            *p_row = value;
+    }
 }
