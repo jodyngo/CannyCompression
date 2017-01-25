@@ -22,6 +22,7 @@ using namespace std;
 
 Mat cannyEdgeDetection(Mat input_matrix);
 void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix);
+void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_left_points_of_interest, int i_offset, int j_offset);
 int totalVals(Mat &matrix, int chanSum = -1);
 void formClusters(set<pair<int, int> > *top_left_points, vector<set<pair<int,int> > >  *known_clusters);
 void updateCluster(pair<int,int> point, set<pair<int,int> > *cluster);
@@ -65,43 +66,7 @@ int main(int argc, char** argv)
     // Perform the edge-detection
     processed_image = cannyEdgeDetection(source_grey);
 
-    // Highlight regions of interest on 4 threads
-    int r = processed_image.rows;
-    int c = processed_image.cols;
-    cout << r << c << endl;
-    int adj_r = 0;
-    int adj_c = 0;
-    if (r % 2 == 0)
-        adj_r = 1;
-    if (c % 2 == 0)
-        adj_c = 1;
-
-    Mat proc1 = processed_image(Rect(0,0,adj_c+c/2,adj_r+r/2));
-    Mat src1 = source_image(Rect(0,0,c/2,r/2));
-    auto regionHandle1 = bind(drawRegionsOfInterest, proc1, src1);
-
-    Mat proc2 = processed_image(Rect(c/2,0,c/2,adj_r+r/2));
-    Mat src2 = source_image(Rect(c/2,0,c/2,r/2));
-    auto regionHandle2 = bind(drawRegionsOfInterest, proc2, src2);
-
-    Mat proc3 = processed_image(Rect(0,r/2,adj_c+c/2,r/2));
-    Mat src3 = source_image(Rect(0,r/2,c/2,r/2));
-    auto regionHandle3 = bind(drawRegionsOfInterest, proc3, src3);
-
-    Mat proc4 = processed_image(Rect(c/2,r/2,c/2,r/2));
-    Mat src4 = source_image(Rect(c/2,r/2,c/2,r/2));
-    auto regionHandle4 = bind(drawRegionsOfInterest, proc4, src4);
-
-    thread regionThread1 (regionHandle1);
-    thread regionThread2 (regionHandle2);
-    thread regionThread3 (regionHandle3);
-    thread regionThread4 (regionHandle4);
-
-
-    regionThread1.join();
-    regionThread2.join();
-    regionThread3.join();
-    regionThread4.join();
+    drawRegionsOfInterest(processed_image, source_image);
 
     // Compress and write image
     vector<int> compVec = {CV_IMWRITE_JPEG_QUALITY, compression_level};
@@ -141,36 +106,44 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
     vector<set<pair<int,int> > >  known_clusters;
     set<pair<int,int> > top_left_points_of_interest;
 
-    int height = proc_matrix.size().height;
-    int width = proc_matrix.size().width;
-    int total = totalVals(proc_matrix);
+    // Highlight regions of interest on 4 threads
+    int r = proc_matrix.rows;
+    int c = proc_matrix.cols;
+    cout << r << c << endl;
+    int adj_r = 0;
+    int adj_c = 0;
+    if (r % 2 == 0)
+        adj_r = 1;
+    if (c % 2 == 0)
+        adj_c = 1;
 
-    for (int i = 0; i < width - SQUARE_SIZE; i += SQUARE_SIZE)
-    {
-        for (int j = 0; j < height - SQUARE_SIZE; j += SQUARE_SIZE)
-        {
-            // Process 8x8 sections
-            Mat section = proc_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
-            int sub_total = totalVals(section);
-            // TODO: Test different cutoff values from 10
-            int section_weight;
-            if (total > 0)
-                section_weight = (1000/SQUARE_SIZE)*(255*sub_total)/total;
-            else
-                section_weight = 0;
-            if (section_weight > 255)
-                section_weight = 255;
-            if (section_weight > 10) // Region of interest
-            {
-                top_left_points_of_interest.insert({i,j});
-            }
-            else
-            {
-                Mat source_section = disp_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
-                downSampleMat(source_section);
-            }
-        }
-    }
+    Mat proc1 = proc_matrix(Rect(0,0,adj_c+c/2,adj_r+r/2));
+    Mat src1 = disp_matrix(Rect(0,0,c/2,r/2));
+    auto regionHandle1 = bind(processSection, proc1, src1, &top_left_points_of_interest, 0, 0);
+
+    Mat proc2 = proc_matrix(Rect(c/2,0,c/2,adj_r+r/2));
+    Mat src2 = disp_matrix(Rect(c/2,0,c/2,r/2));
+    auto regionHandle2 = bind(processSection, proc2, src2, &top_left_points_of_interest, c/2, 0);
+
+    Mat proc3 = proc_matrix(Rect(0,r/2,adj_c+c/2,r/2));
+    Mat src3 = disp_matrix(Rect(0,r/2,c/2,r/2));
+    auto regionHandle3 = bind(processSection, proc3, src3, &top_left_points_of_interest, 0, r/2);
+
+    Mat proc4 = proc_matrix(Rect(c/2,r/2,c/2,r/2));
+    Mat src4 = disp_matrix(Rect(c/2,r/2,c/2,r/2));
+    auto regionHandle4 = bind(processSection, proc4, src4, &top_left_points_of_interest, c/2, r/2);
+
+    thread regionThread1 (regionHandle1);
+    thread regionThread2 (regionHandle2);
+    thread regionThread3 (regionHandle3);
+    thread regionThread4 (regionHandle4);
+
+
+    regionThread1.join();
+    regionThread2.join();
+    regionThread3.join();
+    regionThread4.join();
+
     formClusters(&top_left_points_of_interest, &known_clusters);
 
     // Now draw rectangles around each cluster
@@ -196,6 +169,40 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
         }
         if (!(max_x - min_x > ROI_SIZE_LIMIT || max_y - min_y > ROI_SIZE_LIMIT))
             rectangle(disp_matrix, Point(min_x, min_y), Point(max_x, max_y), Scalar(9,9,179), 1);
+    }
+}
+
+void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_left_points_of_interest, int i_offset, int j_offset)
+{
+    int height = proc_matrix.size().height;
+    int width = proc_matrix.size().width;
+    int total = totalVals(proc_matrix);
+
+    for (int i = 0; i < width - SQUARE_SIZE; i += SQUARE_SIZE)
+    {
+        for (int j = 0; j < height - SQUARE_SIZE; j += SQUARE_SIZE)
+        {
+            // Process 8x8 sections
+            Mat section = proc_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
+            int sub_total = totalVals(section);
+            // TODO: Test different cutoff values from 10
+            int section_weight;
+            if (total > 0)
+                section_weight = (1000/SQUARE_SIZE)*(255*sub_total)/total;
+            else
+                section_weight = 0;
+            if (section_weight > 255)
+                section_weight = 255;
+            if (section_weight > 10) // Region of interest
+            {
+                top_left_points_of_interest->insert({i+i_offset,j+j_offset});
+            }
+            else
+            {
+                Mat source_section = disp_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
+                downSampleMat(source_section);
+            }
+        }
     }
 }
 
