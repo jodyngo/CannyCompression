@@ -1,6 +1,7 @@
 #include "opencv2/imgproc/imgproc.hpp"
 #include "opencv2/highgui/highgui.hpp"
 #include <iostream>
+#include <iomanip>
 #include <algorithm>
 #include <vector>
 #include <utility>
@@ -32,62 +33,119 @@ void setChannel(Mat &mat, unsigned int channel, unsigned char value);
 // Avoid segfaults when multithreading occurs in drawRegionsOfInterest()
 mutex points_of_interest_mutex;
 
-// Input: filename compression_level display
 int main(int argc, char** argv)
 {
-    // Load the image and compression level
-    if ( argc != 3 )
+    int compression_level;
+    vector<string> files_to_read;
+
+    string help_message = "Input options:\n"
+                          "\t-f:<file name> OR -d:<directory path>\n"
+                          "\t<compression level>\n"
+                          "\t-disp (OPTIONAL)";
+    if (!(argc == 3 || argc == 4))
     {
-        cout << "Usage: CannyCompression <file name> <compression level>." << endl;
+        cout << help_message << endl;
         return -1;
     }
-    Mat source_image = imread(argv[1]);
-    if (!source_image.data)
+
+    string input_1 = argv[1];
+    if (input_1.substr(0,3).compare("-f:") == 0)
     {
-        cout << "No image data." << endl;
+        files_to_read.push_back(input_1.substr(3));
+    }
+    else if (input_1.substr(0,3).compare("-d:") == 0)
+    {
+        string dir_path = input_1.substr(3) + "*.jpg";
+        glob(dir_path, files_to_read, true);
+    }
+    else
+    {
+        cout << help_message << endl;
         return -1;
     }
-    int compression_level = atoi(argv[2]);
 
-    // Timing
-    double t = (double)getTickCount();
+    int input_2 = atoi(argv[2]);
+    if (0 <= input_2 && input_2 <= 100)
+    {
+        compression_level = input_2;
+    }
+    else
+    {
+        cout << "Compression level must be between 0 and 100." << endl;
+        return -1;
+    }
 
-    // Pad the source image so that the square size fits without missing spots
-    int pad_down = source_image.size().height % SQUARE_SIZE;
-    int pad_right = source_image.size().width % SQUARE_SIZE;
-    copyMakeBorder(source_image, source_image, 0, pad_down, 0, pad_right, BORDER_REPLICATE);
+    bool display_result = false;
+    if (argc == 4)
+    {
+        string input_3 = argv[3];
+        if (input_3.compare("-disp") == 0)
+            display_result = true;
+    }
 
-    // Create another matrix of the same size and type for the output
-    // of the Canny filter
-    Mat processed_image;
-    processed_image.create(source_image.size(), source_image.type());
+    for (auto curr_file = files_to_read.begin(); curr_file != files_to_read.end(); ++curr_file)
+    {
+        // Announce the current file name
+        cout << "--------------------------------------------------\n"
+             << "Current file: " << *curr_file << "\n"
+             << endl;
+        Mat source_image = imread(*curr_file);
+        if (source_image.empty())
+        {
+            cout << "No image data." << endl;
+            continue;
+        }
 
-    // Convert the source image to greyscale
-    Mat source_grey;
-    cvtColor(source_image, source_grey, CV_BGR2GRAY);
 
-    // Perform the edge-detection
-    processed_image = cannyEdgeDetection(source_grey);
+        // Timing
+        double t = (double)getTickCount();
 
-    // Search through the processed image for clusters of edges and highlight
-    // on the source image
-    drawRegionsOfInterest(processed_image, source_image);
+        // Pad the source image so that the square size fits without missing spots
+        int pad_down = source_image.size().height % SQUARE_SIZE;
+        int pad_right = source_image.size().width % SQUARE_SIZE;
+        copyMakeBorder(source_image, source_image, 0, pad_down, 0, pad_right, BORDER_REPLICATE);
 
-    // Compress and write image
-    vector<int> compVec = {CV_IMWRITE_JPEG_QUALITY, compression_level};
-    string image_name (argv[1]);
-    int i = image_name.find(".");
-    image_name = image_name.substr(0,i);
-    image_name.insert(i, "_COMPRESSED.jpg");
-    imwrite(image_name, source_image, compVec);
+        // Create another matrix of the same size and type for the output
+        // of the Canny filter
+        Mat processed_image;
+        processed_image.create(source_image.size(), source_image.type());
 
-    t = ((double)getTickCount() - t)/getTickFrequency();
-    std::cout << "Processing time: " << t << " s."<< std::endl;
+        // Convert the source image to greyscale
+        Mat source_grey;
+        cvtColor(source_image, source_grey, CV_BGR2GRAY);
 
-    namedWindow("Processed", WINDOW_AUTOSIZE);
-    imshow("Processed", source_image);
+        // Perform the edge-detection
+        processed_image = cannyEdgeDetection(source_grey);
 
-    waitKey(0);
+        // Search through the processed image for clusters of edges and highlight
+        // on the source image
+        drawRegionsOfInterest(processed_image, source_image);
+
+        // Compress and write image
+        vector<int> compVec = {CV_IMWRITE_JPEG_QUALITY, compression_level};
+        // string image_name (argv[1]);
+        // int i = image_name.find(".");
+        // image_name = image_name.substr(0,i);
+        // image_name.insert(i, "_COMPRESSED.jpg");
+        string image_name = *curr_file;
+        int i = image_name.find(".");
+        image_name = image_name.substr(0,i);
+        image_name.insert(i, "_COMPRESSED.jpg");
+        imwrite(image_name, source_image, compVec);
+
+        // Announce timing and end output block
+        t = ((double)getTickCount() - t)/getTickFrequency();
+        std::cout << "Processing time: " << t << " s\n"
+                  << "--------------------------------------------------"
+                  << std::endl;
+
+        if (display_result)
+        {
+            namedWindow("Processed", WINDOW_AUTOSIZE);
+            imshow("Processed", source_image);
+            waitKey(2000);
+        }
+    }
     return 0;
 }
 
