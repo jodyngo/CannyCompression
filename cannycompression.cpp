@@ -24,7 +24,6 @@ using namespace std;
 Mat cannyEdgeDetection(Mat input_matrix);
 void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix);
 void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_left_points_of_interest, int i_offset, int j_offset);
-int totalVals(Mat &matrix, int chanSum = -1);
 void formClusters(set<pair<int, int> > *top_left_points, vector<set<pair<int,int> > >  *known_clusters);
 void updateCluster(pair<int,int> point, set<pair<int,int> > *cluster);
 void downSampleMat(Mat input_matrix);
@@ -78,7 +77,8 @@ int main(int argc, char** argv)
     vector<int> compVec = {CV_IMWRITE_JPEG_QUALITY, compression_level};
     string image_name (argv[1]);
     int i = image_name.find(".");
-    image_name.insert(i, "_COMPRESSED");
+    image_name = image_name.substr(0,i);
+    image_name.insert(i, "_COMPRESSED.jpg");
     imwrite(image_name, source_image, compVec);
 
     t = ((double)getTickCount() - t)/getTickFrequency();
@@ -115,7 +115,6 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
     // Highlight regions of interest on 4 threads
     int r = proc_matrix.rows;
     int c = proc_matrix.cols;
-    cout << r << c << endl;
     int adj_r = 0;
     int adj_c = 0;
     if (r % 2 == 0)
@@ -152,7 +151,7 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
     formClusters(&top_left_points_of_interest, &known_clusters);
 
     // Now draw rectangles around each cluster
-    cout << "Number of clusters found: " << known_clusters.size() << endl;
+    cout << "Regions of interest found: " << known_clusters.size() << endl;
     for (auto cluster = known_clusters.begin(); cluster != known_clusters.end(); ++cluster)
     {
         int min_x = -1;
@@ -181,7 +180,8 @@ void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_l
 {
     int height = proc_matrix.size().height;
     int width = proc_matrix.size().width;
-    int total = totalVals(proc_matrix);
+    double total = sum(proc_matrix)[0] + sum(proc_matrix)[1] + sum(proc_matrix)[2];
+
 
     for (int i = 0; i < width - SQUARE_SIZE; i += SQUARE_SIZE)
     {
@@ -189,7 +189,7 @@ void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_l
         {
             // Process 8x8 sections
             Mat section = proc_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
-            int sub_total = totalVals(section);
+            double sub_total = sum(section)[0] + sum(section)[1] + sum(section)[2];
             // TODO: Test different cutoff values from 10
             int section_weight;
             if (total > 0)
@@ -210,43 +210,6 @@ void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_l
             }
         }
     }
-}
-
-int totalVals(Mat &matrix, int chanSum)
-{
-    int sum = 0;
-    const int channels = matrix.channels();
-    switch(channels)
-    {
-    case 1:
-        {
-            MatIterator_<uchar> it, end;
-            for( it = matrix.begin<uchar>(), end = matrix.end<uchar>(); it != end; ++it)
-                sum += *it;
-        }
-    case 3:
-        {
-            MatIterator_<Vec3b> it, end;
-            for( it = matrix.begin<Vec3b>(), end = matrix.end<Vec3b>(); it != end; ++it)
-            {
-                switch (chanSum)
-                {
-                    case -1: sum += (*it)[0];
-                             sum += (*it)[1];
-                             sum += (*it)[2];
-                             break;
-                    case 0: sum += (*it)[0];
-                            break;
-                    case 1: sum += (*it)[1];
-                            break;
-                    case 2: sum += (*it)[2];
-                            break;
-                }
-
-            }
-        }
-    }
-    return sum;
 }
 
 void formClusters(set<pair<int, int> > *top_left_points, vector<set<pair<int,int> > >  *known_clusters)
@@ -323,9 +286,9 @@ void downSampleMat(Mat input_matrix)
     int height = input_matrix.size().height;
     int width = input_matrix.size().width;
 
-    long totalB = totalVals(input_matrix, 0);
-    long totalG = totalVals(input_matrix, 1);
-    long totalR = totalVals(input_matrix, 2);
+    double totalB = sum(input_matrix)[0];
+    double totalG = sum(input_matrix)[1];
+    double totalR = sum(input_matrix)[2];
 
     int avgColourB = totalB/(height*width);
     int avgColourG = totalG/(height*width);
