@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 2.8)
 project( CannyCompression )
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11 -pthread")
 find_package( OpenCV REQUIRED )
 add_executable( CannyCompression cannycompression.cpp )
 target_link_libraries( CannyCompression ${OpenCV_LIBS} )
