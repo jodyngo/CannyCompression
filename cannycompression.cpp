@@ -85,6 +85,11 @@ int main(int argc, char** argv)
 
     for (auto curr_file = files_to_read.begin(); curr_file != files_to_read.end(); ++curr_file)
     {
+        // Check that this image hasn't already been compressed
+        int len = curr_file->size();
+        if (curr_file->substr(len - 15).compare("_COMPRESSED.jpg") == 0)
+            continue;
+
         // Announce the current file name
         cout << "--------------------------------------------------\n"
              << "Current file: " << *curr_file << "\n"
