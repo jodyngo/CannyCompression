@@ -8,6 +8,7 @@
 #include <string>
 #include <thread>
 #include <functional>
+#include <mutex>
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -28,6 +29,9 @@ void formClusters(set<pair<int, int> > *top_left_points, vector<set<pair<int,int
 void updateCluster(pair<int,int> point, set<pair<int,int> > *cluster);
 void downSampleMat(Mat input_matrix);
 void setChannel(Mat &mat, unsigned int channel, unsigned char value);
+
+// Avoid segfaults when multithreading occurs in drawRegionsOfInterest()
+mutex points_of_interest_mutex;
 
 // Input: filename compression_level display
 int main(int argc, char** argv)
@@ -66,6 +70,8 @@ int main(int argc, char** argv)
     // Perform the edge-detection
     processed_image = cannyEdgeDetection(source_grey);
 
+    // Search through the processed image for clusters of edges and highlight
+    // on the source image
     drawRegionsOfInterest(processed_image, source_image);
 
     // Compress and write image
@@ -138,7 +144,6 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
     thread regionThread3 (regionHandle3);
     thread regionThread4 (regionHandle4);
 
-
     regionThread1.join();
     regionThread2.join();
     regionThread3.join();
@@ -195,6 +200,7 @@ void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_l
                 section_weight = 255;
             if (section_weight > 10) // Region of interest
             {
+                lock_guard<mutex> lock(points_of_interest_mutex);
                 top_left_points_of_interest->insert({i+i_offset,j+j_offset});
             }
             else
