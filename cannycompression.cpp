@@ -10,6 +10,9 @@
 #include <thread>
 #include <functional>
 #include <mutex>
+#include <map>
+#include <cmath>
+#include <algorithm>
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -21,12 +24,19 @@ using namespace std;
 #define CANNY_RATIO 3
 #define SQUARE_SIZE 8
 #define ROI_SIZE_LIMIT 200
+#define WEIGHTING_THRESHOLD 20
+#define CLUSTER_DISTANCE 25
 
+
+bool pointPredicate(const Point2f &a, const Point2f &b);
 Mat cannyEdgeDetection(Mat input_matrix);
-void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix);
-void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_left_points_of_interest, int i_offset, int j_offset);
-void formClusters(set<pair<int, int> > *top_left_points, vector<set<pair<int,int> > >  *known_clusters);
+void findRegionsOfInterest(Mat proc_matrix, Mat disp_matrix, map<pair<int,int>, int > *top_left_points_of_interest);
+void drawRectangles(Mat source_image, vector<set<pair<int,int> > > *known_clusters);
+void processSection(Mat proc_matrix, Mat disp_matrix, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset);
+void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int,int> > >  *known_clusters);
 void updateCluster(pair<int,int> point, set<pair<int,int> > *cluster);
+void startDownSampleThreads(Mat source_image, map<pair<int,int>, int > *top_left_points_of_interest);
+void downSampleImage(Mat source_image, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset);
 void downSampleMat(Mat input_matrix);
 void setChannel(Mat &mat, unsigned int channel, unsigned char value);
 
@@ -110,28 +120,31 @@ int main(int argc, char** argv)
         int pad_right = source_image.size().width % SQUARE_SIZE;
         copyMakeBorder(source_image, source_image, 0, pad_down, 0, pad_right, BORDER_REPLICATE);
 
-        // Create another matrix of the same size and type for the output
-        // of the Canny filter
-        Mat processed_image;
-        processed_image.create(source_image.size(), source_image.type());
+        // Convert to HSV
+        Mat hsv_source;
+        vector<Mat> hsv_channels, edge_channel;
+        cvtColor(source_image, hsv_source, CV_BGR2HSV);
+        split(hsv_source, hsv_channels);
+        hsv_source.release();
 
-        // Convert the source image to greyscale
-        Mat source_grey;
-        cvtColor(source_image, source_grey, CV_BGR2GRAY);
+        // Perform the edge-detection on each HSV channel
+        edge_channel.push_back(cannyEdgeDetection(hsv_channels[0]));
+        edge_channel.push_back(cannyEdgeDetection(hsv_channels[1]));
+        edge_channel.push_back(cannyEdgeDetection(hsv_channels[2]));
 
-        // Perform the edge-detection
-        processed_image = cannyEdgeDetection(source_grey);
+        // Clusters of edges are grouped to be highlighted
+        vector<set<pair<int,int> > >  known_clusters;
+        map<pair<int,int>, int > top_left_points_of_interest; // x,y,weighting
 
-        // Search through the processed image for clusters of edges and highlight
-        // on the source image
-        drawRegionsOfInterest(processed_image, source_image);
+        for (int i = 0; i != 3; ++i)
+            findRegionsOfInterest(edge_channel[i], source_image, &top_left_points_of_interest);
+
+        formClusters(&top_left_points_of_interest, &known_clusters);
+        startDownSampleThreads(source_image, &top_left_points_of_interest);
+        drawRectangles(source_image, &known_clusters);
 
         // Compress and write image
         vector<int> compVec = {CV_IMWRITE_JPEG_QUALITY, compression_level};
-        // string image_name (argv[1]);
-        // int i = image_name.find(".");
-        // image_name = image_name.substr(0,i);
-        // image_name.insert(i, "_COMPRESSED.jpg");
         string image_name = *curr_file;
         int i = image_name.find(".");
         image_name = image_name.substr(0,i);
@@ -148,10 +161,16 @@ int main(int argc, char** argv)
         {
             namedWindow("Processed", WINDOW_AUTOSIZE);
             imshow("Processed", source_image);
-            waitKey(2000);
+            waitKey(0);
         }
     }
     return 0;
+}
+
+bool pointPredicate(const Point2f &a, const Point2f &b)
+{
+    int dist = sqrt(pow((a.x - b.x),2) + pow((a.y - b.y),2));
+    return (dist < CLUSTER_DISTANCE);
 }
 
 Mat cannyEdgeDetection(Mat input_matrix)
@@ -169,12 +188,8 @@ Mat cannyEdgeDetection(Mat input_matrix)
 
 // proc_matrix is used to find areas of interest
 // disp_matrix is used to display these regions
-void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
+void findRegionsOfInterest(Mat proc_matrix, Mat disp_matrix, map<pair<int,int>, int > *top_left_points_of_interest)
 {
-    // Clusters of edges are grouped to be highlighted
-    vector<set<pair<int,int> > >  known_clusters;
-    set<pair<int,int> > top_left_points_of_interest;
-
     // Highlight regions of interest on 4 threads
     int r = proc_matrix.rows;
     int c = proc_matrix.cols;
@@ -187,19 +202,19 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
 
     Mat proc1 = proc_matrix(Rect(0,0,adj_c+c/2,adj_r+r/2));
     Mat src1 = disp_matrix(Rect(0,0,c/2,r/2));
-    auto regionHandle1 = bind(processSection, proc1, src1, &top_left_points_of_interest, 0, 0);
+    auto regionHandle1 = bind(processSection, proc1, src1, top_left_points_of_interest, 0, 0);
 
     Mat proc2 = proc_matrix(Rect(c/2,0,c/2,adj_r+r/2));
     Mat src2 = disp_matrix(Rect(c/2,0,c/2,r/2));
-    auto regionHandle2 = bind(processSection, proc2, src2, &top_left_points_of_interest, c/2, 0);
+    auto regionHandle2 = bind(processSection, proc2, src2, top_left_points_of_interest, c/2, 0);
 
     Mat proc3 = proc_matrix(Rect(0,r/2,adj_c+c/2,r/2));
     Mat src3 = disp_matrix(Rect(0,r/2,c/2,r/2));
-    auto regionHandle3 = bind(processSection, proc3, src3, &top_left_points_of_interest, 0, r/2);
+    auto regionHandle3 = bind(processSection, proc3, src3, top_left_points_of_interest, 0, r/2);
 
     Mat proc4 = proc_matrix(Rect(c/2,r/2,c/2,r/2));
     Mat src4 = disp_matrix(Rect(c/2,r/2,c/2,r/2));
-    auto regionHandle4 = bind(processSection, proc4, src4, &top_left_points_of_interest, c/2, r/2);
+    auto regionHandle4 = bind(processSection, proc4, src4, top_left_points_of_interest, c/2, r/2);
 
     thread regionThread1 (regionHandle1);
     thread regionThread2 (regionHandle2);
@@ -210,12 +225,11 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
     regionThread2.join();
     regionThread3.join();
     regionThread4.join();
+}
 
-    formClusters(&top_left_points_of_interest, &known_clusters);
-
-    // Now draw rectangles around each cluster
-    cout << "Regions of interest found: " << known_clusters.size() << endl;
-    for (auto cluster = known_clusters.begin(); cluster != known_clusters.end(); ++cluster)
+void drawRectangles(Mat source_image, vector<set<pair<int,int> > >  *known_clusters)
+{
+    for (auto cluster = known_clusters->begin(); cluster != known_clusters->end(); ++cluster)
     {
         int min_x = -1;
         int min_y = -1;
@@ -235,15 +249,15 @@ void drawRegionsOfInterest(Mat proc_matrix, Mat disp_matrix)
             max_y = max(max_y, pixel_point->second);
         }
         if (!(max_x - min_x > ROI_SIZE_LIMIT || max_y - min_y > ROI_SIZE_LIMIT))
-            rectangle(disp_matrix, Point(min_x, min_y), Point(max_x, max_y), Scalar(9,9,179), 1);
+            rectangle(source_image, Point(min_x, min_y), Point(max_x + SQUARE_SIZE, max_y + SQUARE_SIZE), Scalar(0,200,50), 1);
     }
 }
 
-void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_left_points_of_interest, int i_offset, int j_offset)
+void processSection(Mat proc_matrix, Mat disp_matrix, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset)
 {
     int height = proc_matrix.size().height;
     int width = proc_matrix.size().width;
-    double total = sum(proc_matrix)[0] + sum(proc_matrix)[1] + sum(proc_matrix)[2];
+    double total = sum(proc_matrix)[0];
 
 
     for (int i = 0; i < width - SQUARE_SIZE; i += SQUARE_SIZE)
@@ -252,85 +266,48 @@ void processSection(Mat proc_matrix, Mat disp_matrix, set<pair<int,int> > *top_l
         {
             // Process 8x8 sections
             Mat section = proc_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
-            double sub_total = sum(section)[0] + sum(section)[1] + sum(section)[2];
-            // TODO: Test different cutoff values from 10
-            int section_weight;
-            if (total > 0)
-                section_weight = (1000/SQUARE_SIZE)*(255*sub_total)/total;
-            else
-                section_weight = 0;
-            if (section_weight > 255)
-                section_weight = 255;
-            if (section_weight > 10) // Region of interest
+            double sub_total = sum(section)[0];
+
+            int section_weight = 10000*sub_total/total;
+            if (section_weight > WEIGHTING_THRESHOLD) // Region of interest
             {
-                lock_guard<mutex> lock(points_of_interest_mutex);
-                top_left_points_of_interest->insert({i+i_offset,j+j_offset});
-            }
-            else
-            {
-                Mat source_section = disp_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
-                downSampleMat(source_section);
+                // Add to existing POI or create a new one
+                auto point_of_interest = top_left_points_of_interest->find({i+i_offset,j+j_offset});
+                if (point_of_interest != top_left_points_of_interest->end())
+                {
+                    point_of_interest->second += 1;
+                }
+                else
+                {
+                    lock_guard<mutex> lock(points_of_interest_mutex);
+                    top_left_points_of_interest->insert({make_pair(i+i_offset,j+j_offset), 1});
+                }
             }
         }
     }
 }
 
-void formClusters(set<pair<int, int> > *top_left_points, vector<set<pair<int,int> > >  *known_clusters)
+void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int,int> > >  *known_clusters)
 {
-    // Select a point from top_left_points
-    // Calculate all its other edges
-    // Check if they are in top_left_points
-    // If so, remove them from top_left_points and calculate their edges
-    // Add every point found to known_clusters
-    while (top_left_points->size() != 0)
+    // Convert pairs to Point2fs
+    vector<Point2f> points_to_cluster;
+    for (auto point = top_left_points->begin(); point != top_left_points->end(); ++point)
     {
-        // Extract the next starting point from top_left_points
-        auto seed_point = top_left_points->begin();
-        int x = seed_point->first;
-        int y = seed_point->second;
-        top_left_points->erase(seed_point);
+        points_to_cluster.push_back(Point2f(point->first.first, point->first.second));
+    }
 
-        // Calculate all other points on the square and record them
-        set<pair<int,int> > seed_square;
-        seed_square.insert({x,y});
-        seed_square.insert({x + SQUARE_SIZE,y});
-        seed_square.insert({x,y + SQUARE_SIZE});
-        seed_square.insert({x + SQUARE_SIZE,y + SQUARE_SIZE});
-        known_clusters->push_back(seed_square);
+    // Use the partition algorithm to determine clusters
+    vector<int> labels;
+    int num_clusters = partition(points_to_cluster, labels, pointPredicate);
+    cout << "Regions of interest found: " << num_clusters << endl;
 
-        set<pair<int, int> > points_to_check;
-        points_to_check.insert({x + SQUARE_SIZE,y});
-        points_to_check.insert({x,y + SQUARE_SIZE});
-        points_to_check.insert({x + SQUARE_SIZE,y + SQUARE_SIZE});
-
-        // Search for connecting squares
-        while (points_to_check.size() != 0)
-        {
-            auto this_point = points_to_check.begin();
-            if (top_left_points->find(*this_point) != top_left_points->end())
-            {
-                top_left_points->erase(*this_point);
-                // A connected square has been found
-                x = this_point->first;
-                y = this_point->second;
-
-                // Check down and to the right
-                points_to_check.insert({x + SQUARE_SIZE,y});
-                points_to_check.insert({x,y + SQUARE_SIZE});
-                points_to_check.insert({x + SQUARE_SIZE,y + SQUARE_SIZE});
-                // Check down and to the left
-                points_to_check.insert({x - SQUARE_SIZE,y});
-                points_to_check.insert({x - SQUARE_SIZE,y + SQUARE_SIZE});
-                // Check up and to the left
-                points_to_check.insert({x,y - SQUARE_SIZE});
-                points_to_check.insert({x - SQUARE_SIZE,y - SQUARE_SIZE});
-                // Check up and to the right
-                points_to_check.insert({x + SQUARE_SIZE,y - SQUARE_SIZE});
-
-                updateCluster(*this_point, &known_clusters->back());
-            }
-            points_to_check.erase(this_point);
-        }
+    // Record the clusters found
+    known_clusters->resize(num_clusters);
+    for (int i = 0; i != labels.size(); ++i)
+    {
+        auto *tmp_cluster = &(*known_clusters)[labels[i]];
+        auto this_point = make_pair(points_to_cluster[i].x, points_to_cluster[i].y);
+        tmp_cluster->insert(this_point);
     }
 }
 
@@ -342,6 +319,60 @@ void updateCluster(pair<int,int> point, set<pair<int,int> > *cluster)
     cluster->insert({x + SQUARE_SIZE,y});
     cluster->insert({x,y + SQUARE_SIZE});
     cluster->insert({x + SQUARE_SIZE,y + SQUARE_SIZE});
+}
+
+void startDownSampleThreads(Mat source_image, map<pair<int,int>, int > *top_left_points_of_interest)
+{
+    // Highlight regions of interest on 4 threads
+    int r = source_image.rows;
+    int c = source_image.cols;
+    int adj_r = 0;
+    int adj_c = 0;
+    if (r % 2 == 0)
+        adj_r = 1;
+    if (c % 2 == 0)
+        adj_c = 1;
+
+    Mat src1 = source_image(Rect(0,0,adj_c+c/2,adj_r+r/2));
+    auto downSampleHandle1 = bind(downSampleImage, src1, top_left_points_of_interest, 0, 0);
+
+    Mat src2 = source_image(Rect(c/2,0,c/2,adj_r+r/2));
+    auto downSampleHandle2 = bind(downSampleImage, src2, top_left_points_of_interest, c/2, 0);
+
+    Mat src3 = source_image(Rect(0,r/2,adj_c+c/2,r/2));
+    auto downSampleHandle3 = bind(downSampleImage, src3, top_left_points_of_interest, 0, r/2);
+
+    Mat src4 = source_image(Rect(c/2,r/2,c/2,r/2));
+    auto downSampleHandle4 = bind(downSampleImage, src4, top_left_points_of_interest, c/2, r/2);
+
+    thread downSampleThread1 (downSampleHandle1);
+    thread downSampleThread2 (downSampleHandle2);
+    thread downSampleThread3 (downSampleHandle3);
+    thread downSampleThread4 (downSampleHandle4);
+
+    downSampleThread1.join();
+    downSampleThread2.join();
+    downSampleThread3.join();
+    downSampleThread4.join();
+}
+
+void downSampleImage(Mat source_image, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset)
+{
+    int height = source_image.size().height;
+    int width = source_image.size().width;
+
+    for (int i = 0; i < width - SQUARE_SIZE; i += SQUARE_SIZE)
+    {
+        for (int j = 0; j < height - SQUARE_SIZE; j += SQUARE_SIZE)
+        {
+            auto point = top_left_points_of_interest->find({i+i_offset, j+j_offset});
+            if (point == top_left_points_of_interest->end())
+            {
+                Mat source_section = source_image(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
+                downSampleMat(source_section);
+            }
+        }
+    }
 }
 
 void downSampleMat(Mat input_matrix)
