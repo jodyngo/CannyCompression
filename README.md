@@ -35,7 +35,7 @@ The level of JPEG compression to be used must also be specified as an integer be
 *Note: Values between 80 to 95 seem to work best, with lower values offering diminishing returns.*
 
 Optionally, you may also select whether you would like the processed images to be displayed using the third command.
-Images are display for 2 seconds before closing.
+Images are displayed until a keypress is logged or the window is closed.
 ```
 ./CannyCompression -d:SamplePictures/ 90 -disp
 ```
