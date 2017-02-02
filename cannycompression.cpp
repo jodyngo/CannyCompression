@@ -29,16 +29,16 @@ using namespace std;
 
 
 bool pointPredicate(const Point2f &a, const Point2f &b);
-Mat cannyEdgeDetection(Mat input_matrix);
+void cannyEdgeDetection(Mat input_matrix, Mat output_matrix);
 void findRegionsOfInterest(Mat proc_matrix, Mat disp_matrix, map<pair<int,int>, int > *top_left_points_of_interest);
 void drawRectangles(Mat source_image, vector<set<pair<int,int> > > *known_clusters);
 void processSection(Mat proc_matrix, Mat disp_matrix, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset);
+void trimPointsOfInterest(map<pair<int,int>, int > *top_left_points_of_interest, vector<int> *point_weightings);
 void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int,int> > >  *known_clusters);
-void updateCluster(pair<int,int> point, set<pair<int,int> > *cluster);
 void startDownSampleThreads(Mat source_image, map<pair<int,int>, int > *top_left_points_of_interest);
 void downSampleImage(Mat source_image, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset);
 void downSampleMat(Mat input_matrix);
-void setChannel(Mat &mat, unsigned int channel, unsigned char value);
+void setChannel(Mat &mat, int channel, unsigned char value);
 
 // Avoid segfaults when multithreading occurs in drawRegionsOfInterest()
 mutex points_of_interest_mutex;
@@ -128,17 +128,33 @@ int main(int argc, char** argv)
         hsv_source.release();
 
         // Perform the edge-detection on each HSV channel
-        edge_channel.push_back(cannyEdgeDetection(hsv_channels[0]));
-        edge_channel.push_back(cannyEdgeDetection(hsv_channels[1]));
-        edge_channel.push_back(cannyEdgeDetection(hsv_channels[2]));
+        // Multithreading for speed
+        edge_channel.resize(3);
+        edge_channel[0].create(hsv_channels[0].size(), hsv_channels[0].type());
+        edge_channel[1].create(hsv_channels[1].size(), hsv_channels[1].type());
+        edge_channel[2].create(hsv_channels[2].size(), hsv_channels[2].type());
+
+        auto cannyHandle0 = bind(cannyEdgeDetection, hsv_channels[0], edge_channel[0]);
+        auto cannyHandle1 = bind(cannyEdgeDetection, hsv_channels[1], edge_channel[1]);
+        auto cannyHandle2 = bind(cannyEdgeDetection, hsv_channels[2], edge_channel[2]);
+
+        thread cannyThread0 (cannyHandle0);
+        thread cannyThread1 (cannyHandle1);
+        thread cannyThread2 (cannyHandle2);
+
+        cannyThread0.join();
+        cannyThread1.join();
+        cannyThread2.join();
 
         // Clusters of edges are grouped to be highlighted
         vector<set<pair<int,int> > >  known_clusters;
         map<pair<int,int>, int > top_left_points_of_interest; // x,y,weighting
+        vector<int> point_weightings;
 
         for (int i = 0; i != 3; ++i)
             findRegionsOfInterest(edge_channel[i], source_image, &top_left_points_of_interest);
 
+        trimPointsOfInterest(&top_left_points_of_interest, &point_weightings);
         formClusters(&top_left_points_of_interest, &known_clusters);
         startDownSampleThreads(source_image, &top_left_points_of_interest);
         drawRectangles(source_image, &known_clusters);
@@ -173,17 +189,13 @@ bool pointPredicate(const Point2f &a, const Point2f &b)
     return (dist < CLUSTER_DISTANCE);
 }
 
-Mat cannyEdgeDetection(Mat input_matrix)
+void cannyEdgeDetection(Mat input_matrix, Mat output_matrix)
 {
-    Mat ret_matrix;
     // Reduce noise with blur
-    blur(input_matrix, ret_matrix, Size(3,3)); // TODO: Try different blur kernel sizes
+    blur(input_matrix, output_matrix, Size(3,3)); // TODO: Try different blur kernel sizes
 
     // Canny edge detection
-    // TODO: Change kernel size and canny ratio
-    Canny(ret_matrix, ret_matrix, CANNY_THRESHOLD, CANNY_THRESHOLD*CANNY_RATIO, 3);
-
-    return ret_matrix;
+    Canny(output_matrix, output_matrix, CANNY_THRESHOLD, CANNY_THRESHOLD*CANNY_RATIO, 3);
 }
 
 // proc_matrix is used to find areas of interest
@@ -259,7 +271,6 @@ void processSection(Mat proc_matrix, Mat disp_matrix, map<pair<int,int>, int > *
     int width = proc_matrix.size().width;
     double total = sum(proc_matrix)[0];
 
-
     for (int i = 0; i < width - SQUARE_SIZE; i += SQUARE_SIZE)
     {
         for (int j = 0; j < height - SQUARE_SIZE; j += SQUARE_SIZE)
@@ -275,15 +286,47 @@ void processSection(Mat proc_matrix, Mat disp_matrix, map<pair<int,int>, int > *
                 auto point_of_interest = top_left_points_of_interest->find({i+i_offset,j+j_offset});
                 if (point_of_interest != top_left_points_of_interest->end())
                 {
-                    point_of_interest->second += 1;
+                    // Existing POI
+                    point_of_interest->second += section_weight;
                 }
                 else
                 {
+                    // New POI
                     lock_guard<mutex> lock(points_of_interest_mutex);
-                    top_left_points_of_interest->insert({make_pair(i+i_offset,j+j_offset), 1});
+                    top_left_points_of_interest->insert({make_pair(i+i_offset,j+j_offset), section_weight});
                 }
             }
         }
+    }
+}
+
+void trimPointsOfInterest(map<pair<int,int>, int > *top_left_points_of_interest, vector<int> *point_weightings)
+{
+    int num_points_of_interest = top_left_points_of_interest->size();
+    if (num_points_of_interest == 0)
+        return;
+
+    // Preallocate for efficiency
+    point_weightings->resize(num_points_of_interest);
+
+    // Put all weightings into the list
+    for (auto point = top_left_points_of_interest->begin(); point != top_left_points_of_interest->end(); ++point)
+    {
+        point_weightings->push_back(point->second);
+    }
+
+    // Sort the vector
+    sort(point_weightings->begin(), point_weightings->end());
+
+    // Determine the threshold
+    int threshold_index = 0.7*point_weightings->size();
+    int threshold = (*point_weightings)[threshold_index];
+
+    // Remove points of interest that fall below the threshold
+    for (auto point = top_left_points_of_interest->begin(); point != top_left_points_of_interest->end(); ++point)
+    {
+        if (point->second < threshold)
+            top_left_points_of_interest->erase(point);
     }
 }
 
@@ -303,22 +346,12 @@ void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int
 
     // Record the clusters found
     known_clusters->resize(num_clusters);
-    for (int i = 0; i != labels.size(); ++i)
+    for (unsigned int i = 0; i != labels.size(); ++i)
     {
         auto *tmp_cluster = &(*known_clusters)[labels[i]];
         auto this_point = make_pair(points_to_cluster[i].x, points_to_cluster[i].y);
         tmp_cluster->insert(this_point);
     }
-}
-
-void updateCluster(pair<int,int> point, set<pair<int,int> > *cluster)
-{
-    int x = point.first;
-    int y = point.second;
-    cluster->insert({x,y});
-    cluster->insert({x + SQUARE_SIZE,y});
-    cluster->insert({x,y + SQUARE_SIZE});
-    cluster->insert({x + SQUARE_SIZE,y + SQUARE_SIZE});
 }
 
 void startDownSampleThreads(Mat source_image, map<pair<int,int>, int > *top_left_points_of_interest)
@@ -393,7 +426,7 @@ void downSampleMat(Mat input_matrix)
     setChannel(input_matrix, 2, avgColourR);
 }
 
-void setChannel(Mat &mat, unsigned int channel, unsigned char value)
+void setChannel(Mat &mat, int channel, unsigned char value)
 {
     // Set all values in the input matrix to a value
     if (mat.channels() < channel + 1)
