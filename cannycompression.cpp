@@ -14,7 +14,7 @@
 #include <map>
 #include <cmath>
 #include <algorithm>
-
+#include <fstream>
 #include <stdlib.h>
 #include <stdio.h>
 
@@ -28,14 +28,15 @@ using namespace std;
 #define WEIGHTING_THRESHOLD 20
 #define CLUSTER_DISTANCE 25
 
-
+bool readConfigFile(vector<double> *config_params, bool &size_thresholding);
 bool pointPredicate(const Point2f &a, const Point2f &b);
 void cannyEdgeDetection(Mat input_matrix, Mat output_matrix);
 void findRegionsOfInterest(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_of_interest);
 void drawRectangles(Mat source_image, vector<set<pair<int,int> > > *known_clusters);
 void processSection(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset);
 void trimPointsOfInterest(map<pair<int,int>, int > *top_left_points_of_interest, vector<int> *point_weightings);
-void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int,int> > >  *known_clusters);
+void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int,int> > >  *known_clusters, bool size_thresholding, vector<double> viewing_data);
+bool acceptableClusterSize(set<pair<int,int> > *cluster, double pixel_length_ratio, double altitude, double viewing_angle, double target_size);
 int findPeople(Mat source_image, vector<set<pair<int,int> > >  *known_clusters);
 void startDownSampleThreads(Mat source_image, vector<set<pair<int,int> > >  *known_clusters);
 void downSampleImage(Mat source_image, vector<set<pair<int,int> > >  *known_clusters, int i_offset, int j_offset);
@@ -52,9 +53,8 @@ int main(int argc, char** argv)
 
     string help_message = "Input options:\n"
                           "\t-f:<file name> OR -d:<directory path>\n"
-                          "\t<compression level>\n"
-                          "\t-disp (OPTIONAL)";
-    if (!(argc == 3 || argc == 4))
+                          "\tOPTIONAL: -disp";
+    if (!(argc == 2 || argc == 3))
     {
         cout << help_message << endl;
         return -1;
@@ -76,22 +76,11 @@ int main(int argc, char** argv)
         return -1;
     }
 
-    int input_2 = atoi(argv[2]);
-    if (0 <= input_2 && input_2 <= 100)
-    {
-        compression_level = input_2;
-    }
-    else
-    {
-        cout << "Compression level must be between 0 and 100." << endl;
-        return -1;
-    }
-
     bool display_result = false;
-    if (argc == 4)
+    if (argc == 3)
     {
-        string input_3 = argv[3];
-        if (input_3.compare("-disp") == 0)
+        string input_2 = argv[2];
+        if (input_2.compare("-disp") == 0)
             display_result = true;
     }
 
@@ -112,6 +101,19 @@ int main(int argc, char** argv)
             cout << "No image data." << endl;
             continue;
         }
+
+        // Update all configuration parameters from config file
+        // {target_size, focal_length, altitude, pixel_size, compression_level};
+        vector<double> config_params (5);
+        bool size_thresholding = false;
+        if (!readConfigFile(&config_params, size_thresholding))
+            return -1;
+
+        cout << "target_size: " << config_params[0] << "\n"
+             << "focal_length: " << config_params[1] << "\n"
+             << "altitude: " << config_params[2] << "\n"
+             << "pixel_size: " << config_params[3] << "\n"
+             << "compression_level: " << config_params[4] << endl;
 
         // Timing
         double t = (double)getTickCount();
@@ -157,12 +159,9 @@ int main(int argc, char** argv)
             findRegionsOfInterest(edge_channel[i], &top_left_points_of_interest);
 
         trimPointsOfInterest(&top_left_points_of_interest, &point_weightings);
-        formClusters(&top_left_points_of_interest, &known_clusters);
-        // int num_people = findPeople(source_image, &known_clusters);
+        formClusters(&top_left_points_of_interest, &known_clusters, size_thresholding, config_params);
         startDownSampleThreads(source_image, &known_clusters);
         drawRectangles(source_image, &known_clusters);
-
-        // cout << "Identified " << num_people << " person(s)." << endl;
 
         // Compress and write image
         vector<int> compVec = {CV_IMWRITE_JPEG_QUALITY, compression_level};
@@ -186,6 +185,88 @@ int main(int argc, char** argv)
         }
     }
     return 0;
+}
+
+bool readConfigFile(vector<double> *config_params, bool &size_thresholding)
+{
+    static const map<string, int> param_indices = {
+        {"target_size", 0},
+        {"focal_length", 1},
+        {"altitude", 2},
+        {"pixel_size", 3},
+        {"compression_level", 4}
+    };
+
+    // Default values for the parameters in case of config file mistakes
+    (*config_params)[0] =   2.0;
+    (*config_params)[1] =   8.5;
+    (*config_params)[2] = 100.0;
+    (*config_params)[3] =  3.69;
+    (*config_params)[4] =    80;
+
+    ifstream config_file;
+    config_file.open("config.conf");
+
+    if (!config_file.is_open())
+    {
+        cout << "Unable to open or locate the configuration file."
+             << "\nUsing default values." << endl;
+        return -1;
+    }
+
+    while (config_file)
+    {
+        string config_line;
+        getline(config_file, config_line);
+
+        size_t i = config_line.find('=');
+        if (i == string::npos)
+            continue;
+        // Extract the parameter name and value, stripping the string of
+        // excess spaces
+        string param_name = config_line.substr(0, i);
+        size_t j = param_name.find_first_of(' ');
+        param_name = param_name.substr(0, j);
+
+        auto param_iter = param_indices.find(param_name);
+        if (param_iter == param_indices.end() &&
+            param_name.compare("size_thresholding") != 0)
+        {
+            cout << "Warning: Config file parameter \""
+                 << param_name
+                 << "\" not recognised." << endl;
+            continue;
+        }
+
+        string param_value = config_line.substr(i + 1);
+        j = param_value.find_last_of(' ');
+        param_value = param_value.substr(j + 1);
+
+        if (param_name.compare("size_thresholding") == 0)
+        {
+            if (param_value.compare("true") == 0)
+            {
+                size_thresholding = true;
+            }
+            else if (param_value.compare("false") == 0)
+            {
+                size_thresholding = false;
+            }
+            else
+            {
+                cout << "Warning: Config file value \""
+                     << param_value
+                     << "\" not recognised as a boolean." << endl;
+            }
+        }
+        else
+        {
+            (*config_params)[param_iter->second] = stod(param_value);
+        }
+    }
+
+    config_file.close();
+    return 1;
 }
 
 bool pointPredicate(const Point2f &a, const Point2f &b)
@@ -331,7 +412,7 @@ void trimPointsOfInterest(map<pair<int,int>, int > *top_left_points_of_interest,
     }
 }
 
-void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int,int> > >  *known_clusters)
+void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int,int> > >  *known_clusters, bool size_thresholding, vector<double> config_params)
 {
     // Convert pairs to Point2fs
     vector<Point2f> points_to_cluster;
@@ -356,23 +437,7 @@ void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int
 
     for (auto cluster = known_clusters->begin(); cluster != known_clusters->end(); ++cluster)
     {
-        int min_x = -1;
-        int min_y = -1;
-        int max_x = -1;
-        int max_y = -1;
-        for (auto pixel_point = cluster->begin(); pixel_point != cluster->end(); ++pixel_point)
-        {
-            if (min_x == -1)
-                min_x = pixel_point->first;
-            if (min_y == -1)
-                min_y = pixel_point->second;
-
-            min_x = min(min_x, pixel_point->first);
-            min_y = min(min_y, pixel_point->second);
-            max_x = max(max_x, pixel_point->first);
-            max_y = max(max_y, pixel_point->second);
-        }
-        if (max_x - min_x > ROI_SIZE_LIMIT || max_y - min_y > ROI_SIZE_LIMIT)
+        if (!acceptableClusterSize(&*cluster, config_params[0], config_params[1], config_params[2], config_params[3]))
             known_clusters->erase(cluster);
 
         // If the last cluster needs to be erased, this will catch it
@@ -380,6 +445,34 @@ void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int
             return;
     }
 
+}
+
+bool acceptableClusterSize(set<pair<int,int> > *cluster, double target_size, double focal_length, double altitude, double pixel_size)
+{
+    int min_x = -1;
+    int min_y = -1;
+    int max_x = -1;
+    int max_y = -1;
+    for (auto pixel_point = cluster->begin(); pixel_point != cluster->end(); ++pixel_point)
+    {
+        if (min_x == -1)
+            min_x = pixel_point->first;
+        if (min_y == -1)
+            min_y = pixel_point->second;
+
+        min_x = min(min_x, pixel_point->first);
+        min_y = min(min_y, pixel_point->second);
+        max_x = max(max_x, pixel_point->first);
+        max_y = max(max_y, pixel_point->second);
+    }
+    double max_apparent_size = target_size * focal_length / altitude;
+    int maximum_pixel_size = ceil(max_apparent_size / pixel_size);
+    if (max_x - min_x > maximum_pixel_size || max_y - min_y > maximum_pixel_size)
+    {
+        return false;
+    }
+
+    return true;
 }
 
 // Note: This function will probably be removed in future
@@ -390,6 +483,14 @@ int findPeople(Mat source_image, vector<set<pair<int,int> > >  *known_clusters)
     HOGDescriptor hog;
     hog.setSVMDetector(HOGDescriptor::getDefaultPeopleDetector());
     vector<Rect> people_found;
+
+    int height = source_image.size().height;
+    int width = source_image.size().width;
+    if (width < 64 || height < 128)
+    {
+        cout << "Image too small to identify people effectively." << endl;
+        return 0;
+    }
 
     // Find appropriate clusters and scale them to 64x128
     for (auto cluster : *known_clusters)
@@ -412,17 +513,78 @@ int findPeople(Mat source_image, vector<set<pair<int,int> > >  *known_clusters)
             max_x = max(max_x, pixel_point->first);
             max_y = max(max_y, pixel_point->second);
         }
-        // Clusters that are deemed too small to contain people are skipped
+        // Skip excessively small clusters
         if (max_x - min_x < 3 || max_y - min_y < 3)
             continue;
-        Mat source_cluster = source_image(Rect(Point(min_x, min_y), Point(max_x, max_y)));
+
+        // Find the multiple of 64x128 that this cluster will need to be extended to
+        int max_scale = max(ceil((max_x - min_x) / 64.0),
+                            ceil((max_y - min_y) / 128.0));
+        int dim_req_x =  64 * max_scale;
+        int dim_req_y = 128 * max_scale;
+
+        // Don't check an entire image for people
+        if (dim_req_x > width || dim_req_y > height)
+            continue;
+
+        // The amount of extension this cluster requires to reach a multiple of 64x128
+        int extension_x = dim_req_x - (max_x - min_x);
+        int extension_y = dim_req_y - (max_y - min_y);
+
+        Point top_left = Point(min_x, min_y),
+              bottom_right = Point(max_x, max_y);
+
+        // Default extensions
+        top_left.x = min_x - extension_x/2;
+        top_left.y = min_y - extension_y/2;
+        bottom_right.x = max_x + (extension_x - extension_x/2);
+        bottom_right.y = max_y + (extension_y - extension_y/2);
+
+        if (min_x < extension_x / 2)
+        {
+            // Not enough room to the left
+            top_left.x = 0;
+            bottom_right.x = max_x + extension_x - min_x;
+        }
+
+        if (min_y < extension_y / 2)
+        {
+            // Not enough room above
+            top_left.y = 0;
+            bottom_right.y = max_y + extension_y - min_y;
+        }
+
+        if (width - max_x < extension_x / 2)
+        {
+            // Not enough room to the right
+            bottom_right.x = width;
+            top_left.x = min_x - (extension_x - (width - max_x));
+        }
+
+        if (height - max_y < extension_y / 2)
+        {
+            // Not enough room below
+            bottom_right.y = height;
+            top_left.y = min_y - (extension_y - (height - max_y));
+        }
+
+        Mat source_cluster = source_image(Rect(top_left, bottom_right));
         Mat source_cluster_clone = source_cluster.clone();
-        resize(source_cluster_clone, source_cluster_clone, Size(64,128));
+        resize(source_cluster_clone, source_cluster_clone, Size(256, 512));
+
+
+        // // Clusters that are deemed too small to contain people are skipped
+        // if (max_x - min_x < 3 || max_y - min_y < 3)
+        //     continue;
+        // Mat source_cluster = source_image(Rect(Point(min_x, min_y), Point(max_x, max_y)));
+        // Mat source_cluster_clone = source_cluster.clone();
+        // resize(source_cluster_clone, source_cluster_clone, Size(64,128));
 
         // Detection
-        hog.detectMultiScale(source_cluster_clone, people_found, 0, Size(4,4), Size(32,32), 1.05, 2);
+        hog.detectMultiScale(source_cluster_clone, people_found, 0, Size(8,8), Size(0,0), 1.05, 2);
         person_count += people_found.size();
     }
+
 
     return person_count;
 }
