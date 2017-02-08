@@ -17,6 +17,7 @@
 #include <fstream>
 #include <stdlib.h>
 #include <stdio.h>
+#include <chrono>
 
 using namespace cv;
 using namespace std;
@@ -36,7 +37,7 @@ void drawRectangles(Mat source_image, vector<set<pair<int,int> > > *known_cluste
 void processSection(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset);
 void trimPointsOfInterest(map<pair<int,int>, int > *top_left_points_of_interest, vector<int> *point_weightings);
 void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int,int> > >  *known_clusters, bool size_thresholding, vector<double> viewing_data);
-bool acceptableClusterSize(set<pair<int,int> > *cluster, double pixel_length_ratio, double altitude, double viewing_angle, double target_size);
+bool acceptableClusterSize(set<pair<int,int> > *cluster, bool size_thresholding, vector<double> config_params);
 int findPeople(Mat source_image, vector<set<pair<int,int> > >  *known_clusters);
 void startDownSampleThreads(Mat source_image, vector<set<pair<int,int> > >  *known_clusters);
 void downSampleImage(Mat source_image, vector<set<pair<int,int> > >  *known_clusters, int i_offset, int j_offset);
@@ -48,7 +49,6 @@ mutex points_of_interest_mutex;
 
 int main(int argc, char** argv)
 {
-    int compression_level;
     vector<string> files_to_read;
 
     string help_message = "Input options:\n"
@@ -61,13 +61,16 @@ int main(int argc, char** argv)
     }
 
     string input_1 = argv[1];
+    string dir_path;
+    bool read_single_file = false;
     if (input_1.substr(0,3).compare("-f:") == 0)
     {
         files_to_read.push_back(input_1.substr(3));
+        read_single_file = true;
     }
     else if (input_1.substr(0,3).compare("-d:") == 0)
     {
-        string dir_path = input_1.substr(3) + "*.jpg";
+        dir_path = input_1.substr(3) + "*.jpg";
         glob(dir_path, files_to_read, true);
     }
     else
@@ -84,8 +87,31 @@ int main(int argc, char** argv)
             display_result = true;
     }
 
-    for (auto curr_file = files_to_read.begin(); curr_file != files_to_read.end(); ++curr_file)
+    set<string> files_read;
+    int num_images_to_process = 0;
+    int images_processed = 0;
+
+    // for (auto curr_file = files_to_read.begin(); curr_file != files_to_read.end(); ++curr_file)
+    // Process indefinitely if num_images_to_process = 0
+    while (images_processed != num_images_to_process || num_images_to_process == 0)
     {
+        // Update the image list
+        if (!read_single_file)
+            glob(dir_path, files_to_read, true);
+
+        // Find the next image that hasn't been processed
+        auto curr_file = files_to_read.begin();
+        while (files_read.find(*curr_file) != files_read.end() && curr_file != files_to_read.end())
+        {
+            ++curr_file;
+        }
+        if (curr_file == files_to_read.end())
+        {
+            this_thread::sleep_for(chrono::milliseconds(50));
+            continue;
+        }
+        files_read.insert(*curr_file);
+
         // Check that this image hasn't already been compressed
         int len = curr_file->size();
         if (curr_file->substr(len - 15).compare("_COMPRESSED.jpg") == 0)
@@ -101,19 +127,15 @@ int main(int argc, char** argv)
             cout << "No image data." << endl;
             continue;
         }
+        ++images_processed;
 
         // Update all configuration parameters from config file
-        // {target_size, focal_length, altitude, pixel_size, compression_level};
-        vector<double> config_params (5);
+        // target_size, focal_length, altitude, pixel_size, compression_level, num_images_to_process
+        vector<double> config_params (6);
         bool size_thresholding = false;
         if (!readConfigFile(&config_params, size_thresholding))
             return -1;
-
-        cout << "target_size: " << config_params[0] << "\n"
-             << "focal_length: " << config_params[1] << "\n"
-             << "altitude: " << config_params[2] << "\n"
-             << "pixel_size: " << config_params[3] << "\n"
-             << "compression_level: " << config_params[4] << endl;
+        num_images_to_process = config_params[5];
 
         // Timing
         double t = (double)getTickCount();
@@ -164,6 +186,7 @@ int main(int argc, char** argv)
         drawRectangles(source_image, &known_clusters);
 
         // Compress and write image
+        int compression_level = config_params[4];
         vector<int> compVec = {CV_IMWRITE_JPEG_QUALITY, compression_level};
         string image_name = *curr_file;
         int i = image_name.find(".");
@@ -183,6 +206,10 @@ int main(int argc, char** argv)
             imshow("Processed", source_image);
             waitKey(0);
         }
+
+        // If the user chose to only read a single file, stop here
+        if (read_single_file)
+            return 0;
     }
     return 0;
 }
@@ -190,11 +217,12 @@ int main(int argc, char** argv)
 bool readConfigFile(vector<double> *config_params, bool &size_thresholding)
 {
     static const map<string, int> param_indices = {
-        {"target_size", 0},
-        {"focal_length", 1},
-        {"altitude", 2},
-        {"pixel_size", 3},
-        {"compression_level", 4}
+        {"target_size",           0},
+        {"focal_length",          1},
+        {"altitude",              2},
+        {"pixel_size",            3},
+        {"compression_level",     4},
+        {"num_images_to_process", 5}
     };
 
     // Default values for the parameters in case of config file mistakes
@@ -437,7 +465,7 @@ void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int
 
     for (auto cluster = known_clusters->begin(); cluster != known_clusters->end(); ++cluster)
     {
-        if (!acceptableClusterSize(&*cluster, config_params[0], config_params[1], config_params[2], config_params[3]))
+        if (!acceptableClusterSize(&*cluster, size_thresholding, config_params))
             known_clusters->erase(cluster);
 
         // If the last cluster needs to be erased, this will catch it
@@ -447,7 +475,7 @@ void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int
 
 }
 
-bool acceptableClusterSize(set<pair<int,int> > *cluster, double target_size, double focal_length, double altitude, double pixel_size)
+bool acceptableClusterSize(set<pair<int,int> > *cluster, bool size_thresholding, vector<double> config_params)
 {
     int min_x = -1;
     int min_y = -1;
@@ -465,9 +493,21 @@ bool acceptableClusterSize(set<pair<int,int> > *cluster, double target_size, dou
         max_x = max(max_x, pixel_point->first);
         max_y = max(max_y, pixel_point->second);
     }
+
+    double target_size = config_params[0];
+    double focal_length = config_params[1] / 1000;
+    double altitude = config_params[2];
+    double pixel_size = config_params[3] / 1000000;
+
     double max_apparent_size = target_size * focal_length / altitude;
     int maximum_pixel_size = ceil(max_apparent_size / pixel_size);
-    if (max_x - min_x > maximum_pixel_size || max_y - min_y > maximum_pixel_size)
+
+    if ((max_x - min_x > maximum_pixel_size || max_y - min_y > maximum_pixel_size) &&
+        size_thresholding)
+    {
+        return false;
+    }
+    else if (max_x - min_x > ROI_SIZE_LIMIT || max_y - min_y > ROI_SIZE_LIMIT)
     {
         return false;
     }
