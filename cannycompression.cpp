@@ -37,6 +37,7 @@ void cannyEdgeDetection(Mat input_matrix, Mat output_matrix);
 void findRegionsOfInterest(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_of_interest);
 void drawRectangles(Mat source_image, vector<set<pair<int,int> > > *known_clusters);
 void processSection(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset);
+void strengthenClusters(map<pair<int,int>, int > *top_left_points_of_interest);
 void trimPointsOfInterest(map<pair<int,int>, int > *top_left_points_of_interest, vector<int> *point_weightings);
 void formClusters(map<pair<int,int>, int > *top_left_points, vector<set<pair<int,int> > >  *known_clusters, bool size_thresholding, vector<double> viewing_data);
 bool acceptableClusterSize(set<pair<int,int> > *cluster, bool size_thresholding, vector<double> config_params);
@@ -191,7 +192,22 @@ int main(int argc, char** argv)
         for (int i = 0; i != 3; ++i)
             findRegionsOfInterest(edge_channel[i], &top_left_points_of_interest);
 
+        strengthenClusters(&top_left_points_of_interest);
         trimPointsOfInterest(&top_left_points_of_interest, &point_weightings);
+
+        // TEMP
+        Mat tmp (source_image.size(), source_image.type(), Scalar(0,0,0));
+        sort(point_weightings.begin(), point_weightings.end());
+        double max_val = point_weightings[point_weightings.size() - 1];
+        for (auto point : top_left_points_of_interest)
+        {
+            Scalar colour = Scalar(0, 0, (255.0 * point.second) / max_val);
+            rectangle(tmp, Point(point.first.first, point.first.second),
+                           Point(point.first.first + SQUARE_SIZE, point.first.second + SQUARE_SIZE),
+                           colour, -1);
+        }
+        string tmp_name = *curr_file + "\b\b\b\b_TMP.jpg";
+
         formClusters(&top_left_points_of_interest, &known_clusters, size_thresholding, config_params);
         startDownSampleThreads(source_image, &known_clusters);
         drawRectangles(source_image, &known_clusters);
@@ -204,6 +220,8 @@ int main(int argc, char** argv)
         image_name = image_name.substr(0,i);
         image_name.insert(i, "_COMPRESSED.jpg");
         imwrite(image_name, source_image, compVec);
+        compVec[1] = 100;
+        imwrite(tmp_name, tmp, compVec); // TEMP
 
         // Announce timing and end output block
         t = ((double)getTickCount() - t)/getTickFrequency();
@@ -271,6 +289,7 @@ bool readConfigFile(vector<double> *config_params, bool &size_thresholding)
     (*config_params)[2] = 100.0;
     (*config_params)[3] =  3.69;
     (*config_params)[4] =    80;
+    (*config_params)[5] =     0;
 
     ifstream config_file;
     config_file.open("config.conf");
@@ -410,13 +429,6 @@ void drawRectangles(Mat source_image, vector<set<pair<int,int> > >  *known_clust
 
 void processSection(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_of_interest, int i_offset, int j_offset)
 {
-    int scaling = 1;
-    if (i_offset == -1 && j_offset == -1)
-    {
-        scaling = 1;
-        i_offset = 0;
-        j_offset = 0;
-    }
     int height = proc_matrix.size().height;
     int width = proc_matrix.size().width;
     double total = sum(proc_matrix)[0];
@@ -429,7 +441,7 @@ void processSection(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_o
             Mat section = proc_matrix(Rect(i,j,SQUARE_SIZE,SQUARE_SIZE));
             double sub_total = sum(section)[0];
 
-            double section_weight = scaling*10000*sub_total/total;
+            double section_weight = 10000*sub_total/total;
             if (section_weight > WEIGHTING_THRESHOLD) // Region of interest
             {
                 // Add to existing POI or create a new one
@@ -450,6 +462,29 @@ void processSection(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_o
     }
 }
 
+void strengthenClusters(map<pair<int,int>, int > *top_left_points_of_interest)
+{
+    // Increase the weighting of each POI in inverse proportion to its distance
+    // from other POIs
+    for (auto point = top_left_points_of_interest->begin(); point != top_left_points_of_interest->end(); ++point)
+    {
+        double weighting_increase = 0;
+        for (auto other_point = top_left_points_of_interest->begin(); other_point != top_left_points_of_interest->end(); ++other_point)
+        {
+            if (point == other_point)
+            {
+                continue;
+            }
+            int X = point->first.first,
+                Y = point->first.second,
+                x = other_point->first.first,
+                y = other_point->first.second;
+            weighting_increase += 100000 / pow((pow(x - X, 2) + pow(y - Y, 2)), 2);
+        }
+        point->second += weighting_increase;
+    }
+}
+
 void trimPointsOfInterest(map<pair<int,int>, int > *top_left_points_of_interest, vector<int> *point_weightings)
 {
     int num_points_of_interest = top_left_points_of_interest->size();
@@ -459,24 +494,24 @@ void trimPointsOfInterest(map<pair<int,int>, int > *top_left_points_of_interest,
     // Preallocate for efficiency
     point_weightings->resize(num_points_of_interest);
 
-    // Put all weightings into the list
+    // Put all nonzero weightings into the list
     for (auto point = top_left_points_of_interest->begin(); point != top_left_points_of_interest->end(); ++point)
     {
         point_weightings->push_back(point->second);
     }
 
-    // Sort the vector
-    sort(point_weightings->begin(), point_weightings->end());
-
     // Determine the threshold
-    int threshold_index = 0.7*point_weightings->size();
-    int threshold = (*point_weightings)[threshold_index];
+    int threshold_index = 0.3*point_weightings->size();
+    nth_element(point_weightings->begin(), point_weightings->begin() + threshold_index, point_weightings->end());
+    int threshold = *(point_weightings->begin() + threshold_index);
 
     // Remove points of interest that fall below the threshold
     for (auto point = top_left_points_of_interest->begin(); point != top_left_points_of_interest->end(); ++point)
     {
         if (point->second < threshold)
+        {
             top_left_points_of_interest->erase(point);
+        }
     }
 }
 
