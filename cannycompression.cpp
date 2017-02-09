@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <chrono>
+#include <ctime>
 
 using namespace cv;
 using namespace std;
@@ -29,6 +30,7 @@ using namespace std;
 #define WEIGHTING_THRESHOLD 20
 #define CLUSTER_DISTANCE 25
 
+void removeNonImageFiles(vector<string> *files_to_read);
 bool readConfigFile(vector<double> *config_params, bool &size_thresholding);
 bool pointPredicate(const Point2f &a, const Point2f &b);
 void cannyEdgeDetection(Mat input_matrix, Mat output_matrix);
@@ -43,6 +45,8 @@ void startDownSampleThreads(Mat source_image, vector<set<pair<int,int> > >  *kno
 void downSampleImage(Mat source_image, vector<set<pair<int,int> > >  *known_clusters, int i_offset, int j_offset);
 void downSampleMat(Mat input_matrix);
 void setChannel(Mat &mat, int channel, unsigned char value);
+void updateLogFile(const double avg_proc_time, const int images_processed,
+    const vector<string> &files_to_read, const vector<double> &config_params, const bool size_thresholding);
 
 // Avoid segfaults when multithreading occurs in drawRegionsOfInterest()
 mutex points_of_interest_mutex;
@@ -88,8 +92,9 @@ int main(int argc, char** argv)
     }
 
     set<string> files_read;
-    int num_images_to_process = 0;
-    int images_processed = 0;
+    size_t num_images_to_process = 0;
+    size_t images_processed = 0;
+    double avg_proc_time = 0;
 
     // for (auto curr_file = files_to_read.begin(); curr_file != files_to_read.end(); ++curr_file)
     // Process indefinitely if num_images_to_process = 0
@@ -98,6 +103,8 @@ int main(int argc, char** argv)
         // Update the image list
         if (!read_single_file)
             glob(dir_path, files_to_read, true);
+
+        removeNonImageFiles(&files_to_read);
 
         // Find the next image that hasn't been processed
         auto curr_file = files_to_read.begin();
@@ -111,6 +118,7 @@ int main(int argc, char** argv)
             continue;
         }
         files_read.insert(*curr_file);
+        ++images_processed;
 
         // Check that this image hasn't already been compressed
         int len = curr_file->size();
@@ -121,13 +129,19 @@ int main(int argc, char** argv)
         cout << "--------------------------------------------------\n"
              << "Current file: " << *curr_file << "\n"
              << endl;
+
+        // Timing
+        double t = (double)getTickCount();
+
+        // Read and check the file
         Mat source_image = imread(*curr_file);
         if (source_image.empty())
         {
             cout << "No image data." << endl;
+            if (read_single_file)
+                return -1;
             continue;
         }
-        ++images_processed;
 
         // Update all configuration parameters from config file
         // target_size, focal_length, altitude, pixel_size, compression_level, num_images_to_process
@@ -136,9 +150,6 @@ int main(int argc, char** argv)
         if (!readConfigFile(&config_params, size_thresholding))
             return -1;
         num_images_to_process = config_params[5];
-
-        // Timing
-        double t = (double)getTickCount();
 
         // Pad the source image so that the square size fits without missing spots
         int pad_down = source_image.size().height % 2*SQUARE_SIZE;
@@ -200,6 +211,15 @@ int main(int argc, char** argv)
                   << "--------------------------------------------------"
                   << std::endl;
 
+        avg_proc_time *= images_processed - 1;
+        avg_proc_time = (avg_proc_time + t) / images_processed;
+        if (images_processed % 5 == 0 ||
+            images_processed == num_images_to_process ||
+            images_processed == files_to_read.size())
+        {
+            updateLogFile(avg_proc_time, images_processed, files_to_read, config_params, size_thresholding);
+        }
+
         if (display_result)
         {
             namedWindow("Processed", WINDOW_AUTOSIZE);
@@ -212,6 +232,26 @@ int main(int argc, char** argv)
             return 0;
     }
     return 0;
+}
+
+void removeNonImageFiles(vector<string> *files_to_read)
+{
+    // Note: This function currently only accepts .jpg images
+
+    for (auto filename = files_to_read->begin(); filename != files_to_read->end(); ++filename)
+    {
+        // Erase filenames that are not images and images that have already been processed
+        size_t i = filename->find('.');
+        size_t j = filename->find('_');
+
+        if ((i != string::npos && filename->substr(i).compare(".jpg") != 0 ) ||
+            (j != string::npos && filename->substr(j,i).compare("_COMPRESSED.jpg") == 0))
+        {
+            files_to_read->erase(filename);
+            if (filename == files_to_read->end())
+                return;
+        }
+    }
 }
 
 bool readConfigFile(vector<double> *config_params, bool &size_thresholding)
@@ -746,4 +786,58 @@ void setChannel(Mat &mat, int channel, unsigned char value)
         for (; p_row != row_end; p_row += step)
             *p_row = value;
     }
+}
+
+void updateLogFile(const double avg_proc_time, const int images_processed,
+    const vector<string> &files_to_read, const vector<double> &config_params, const bool size_thresholding)
+{
+    // Timestamp logs by year-month-day
+    static string timestamp;
+    static bool log_name_created = false;
+    time_t now = time(NULL);
+    if (!log_name_created)
+    {
+        char date[12];
+        date[0] = '\0';
+        if (now != -1)
+            strftime(date, 12, "%F", localtime(&now));
+        timestamp = date;
+        log_name_created = true;
+    }
+
+    static string log_file_name = "Logs/LOG_" + timestamp + ".txt";
+    ofstream log_file;
+    log_file.open(log_file_name, ios_base::app);
+    if (!log_file.is_open())
+    {
+        cout << "Failed to open log file. Please check that you have a directory "
+             << "named \"Logs\" in the CannyCompression directory." << endl;
+        log_file.close();
+        return;
+    }
+
+    // Generate the message for the log
+    char time_array[9];
+    strftime(time_array, 9, "%T", localtime(&now));
+    string time_str = time_array;
+
+    log_file << "Time: " << time_str << "\n"
+             << "\tImages processed: " << images_processed << "/" << files_to_read.size() << "\n"
+             << "\tAverage processing time: " << setprecision(0) << fixed << 1000*avg_proc_time << " ms\n"
+             << "\tConfiguration:\n"
+             << "\t\tCompression level: " << (int)config_params[4] << "\n";
+    if (size_thresholding)
+    {
+        log_file << "\t\tSize thresholding: ENABLED\n"
+                 << "\t\tTarget size: " << config_params[0] << " m\n"
+                 << "\t\tFocal length: " << config_params[1] << " mm\n"
+                 << "\t\tAltitude: " << config_params[2] << " m\n"
+                 << "\t\tPixel size: " << config_params[3] << " um";
+    }
+    else
+    {
+        log_file << "\t\tSize thresholding: DISABLED";
+    }
+    log_file << "\n" << endl;
+    log_file.close();
 }

@@ -1,0 +1,66 @@
+Time: 13:18:41
+	Images processed: 5/27
+	Average processing time: 300 ms
+	Configuration:
+		Compression level: 80
+		Size thresholding: ENABLED
+		Target size: 2 m
+		Focal length: 8 mm
+		Altitude: 100 m
+		Pixel size: 4 um
+
+Time: 13:18:42
+	Images processed: 10/27
+	Average processing time: 200 ms
+	Configuration:
+		Compression level: 80
+		Size thresholding: ENABLED
+		Target size: 2 m
+		Focal length: 8 mm
+		Altitude: 100 m
+		Pixel size: 4 um
+
+Time: 13:18:45
+	Images processed: 15/27
+	Average processing time: 331 ms
+	Configuration:
+		Compression level: 80
+		Size thresholding: ENABLED
+		Target size: 2 m
+		Focal length: 8 mm
+		Altitude: 100 m
+		Pixel size: 4 um
+
+Time: 13:18:45
+	Images processed: 20/27
+	Average processing time: 273 ms
+	Configuration:
+		Compression level: 80
+		Size thresholding: ENABLED
+		Target size: 2 m
+		Focal length: 8 mm
+		Altitude: 100 m
+		Pixel size: 4 um
+
+Time: 13:18:46
+	Images processed: 25/27
+	Average processing time: 229 ms
+	Configuration:
+		Compression level: 80
+		Size thresholding: ENABLED
+		Target size: 2 m
+		Focal length: 8 mm
+		Altitude: 100 m
+		Pixel size: 4 um
+
+Time: 13:18:46
+	Images processed: 27/27
+	Average processing time: 233 ms
+	Configuration:
+		Compression level: 80
+		Size thresholding: ENABLED
+		Target size: 2 m
+		Focal length: 8 mm
+		Altitude: 100 m
+		Pixel size: 4 um
+
