@@ -355,18 +355,6 @@ void cannyEdgeDetection(Mat input_matrix, Mat output_matrix)
     Canny(output_matrix, output_matrix, CANNY_THRESHOLD, CANNY_THRESHOLD*CANNY_RATIO, 3);
 }
 
-double calcEccentricity(vector<Point> contour)
-{
-    // Moments m = moments(contour, false);
-    // double numerator = pow(m.mu20 - m.mu02, 2) - 4 * pow(m.mu11, 2);
-    // double denominator = pow(m.mu20 + m.mu02, 2);
-    // return abs(numerator / denominator);
-
-    RotatedRect bounding_ellipse = fitEllipse(contour);
-    return max(bounding_ellipse.size.height / bounding_ellipse.size.width,
-               bounding_ellipse.size.width / bounding_ellipse.size.height);
-}
-
 void findRegionsOfInterest(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_of_interest)
 {
     Mat kernel = getStructuringElement(MORPH_ELLIPSE, Size(4,4));
@@ -378,7 +366,9 @@ void findRegionsOfInterest(Mat proc_matrix, map<pair<int,int>, int > *top_left_p
     Mat tmp = Mat::zeros(proc_matrix.size(), proc_matrix.type());
     for (int i = 0; i != contours.size(); ++i)
     {
-        double eccentricity = calcEccentricity(contours[i]);
+        RotatedRect bounding_ellipse = fitEllipse(contours[i]);
+        double eccentricity = max(bounding_ellipse.size.height / bounding_ellipse.size.width,
+                                  bounding_ellipse.size.width / bounding_ellipse.size.height);
         if (eccentricity < 3)
         {
             drawContours(tmp, contours, i, Scalar(255), 1);
