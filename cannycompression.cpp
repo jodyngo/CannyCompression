@@ -28,7 +28,7 @@ using namespace std;
 #define SQUARE_SIZE 8
 #define ROI_SIZE_LIMIT 200
 #define WEIGHTING_THRESHOLD 20
-#define CLUSTER_DISTANCE 25
+#define CLUSTER_DISTANCE 16
 
 void removeNonImageFiles(vector<string> *files_to_read);
 bool readConfigFile(vector<double> *config_params, bool &size_thresholding);
@@ -194,20 +194,6 @@ int main(int argc, char** argv)
 
         strengthenClusters(&top_left_points_of_interest);
         trimPointsOfInterest(&top_left_points_of_interest, &point_weightings);
-
-        // TEMP
-        Mat tmp (source_image.size(), source_image.type(), Scalar(0,0,0));
-        sort(point_weightings.begin(), point_weightings.end());
-        double max_val = point_weightings[point_weightings.size() - 1];
-        for (auto point : top_left_points_of_interest)
-        {
-            Scalar colour = Scalar(0, 0, (255.0 * point.second) / max_val);
-            rectangle(tmp, Point(point.first.first, point.first.second),
-                           Point(point.first.first + SQUARE_SIZE, point.first.second + SQUARE_SIZE),
-                           colour, -1);
-        }
-        string tmp_name = *curr_file + "\b\b\b\b_TMP.jpg";
-
         formClusters(&top_left_points_of_interest, &known_clusters, size_thresholding, config_params);
         startDownSampleThreads(source_image, &known_clusters);
         drawRectangles(source_image, &known_clusters);
@@ -220,8 +206,6 @@ int main(int argc, char** argv)
         image_name = image_name.substr(0,i);
         image_name.insert(i, "_COMPRESSED.jpg");
         imwrite(image_name, source_image, compVec);
-        compVec[1] = 100;
-        imwrite(tmp_name, tmp, compVec); // TEMP
 
         // Announce timing and end output block
         t = ((double)getTickCount() - t)/getTickFrequency();
@@ -371,10 +355,37 @@ void cannyEdgeDetection(Mat input_matrix, Mat output_matrix)
     Canny(output_matrix, output_matrix, CANNY_THRESHOLD, CANNY_THRESHOLD*CANNY_RATIO, 3);
 }
 
-// proc_matrix is used to find areas of interest
-// disp_matrix is used to display these regions
+double calcEccentricity(vector<Point> contour)
+{
+    // Moments m = moments(contour, false);
+    // double numerator = pow(m.mu20 - m.mu02, 2) - 4 * pow(m.mu11, 2);
+    // double denominator = pow(m.mu20 + m.mu02, 2);
+    // return abs(numerator / denominator);
+
+    RotatedRect bounding_ellipse = fitEllipse(contour);
+    return max(bounding_ellipse.size.height / bounding_ellipse.size.width,
+               bounding_ellipse.size.width / bounding_ellipse.size.height);
+}
+
 void findRegionsOfInterest(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_of_interest)
 {
+    Mat kernel = getStructuringElement(MORPH_ELLIPSE, Size(4,4));
+    morphologyEx(proc_matrix, proc_matrix, MORPH_GRADIENT, kernel);
+
+    vector<vector<Point> > contours;
+    vector<Vec4i> hierarchy;
+    findContours(proc_matrix, contours, hierarchy, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_NONE);
+    Mat tmp = Mat::zeros(proc_matrix.size(), proc_matrix.type());
+    for (int i = 0; i != contours.size(); ++i)
+    {
+        double eccentricity = calcEccentricity(contours[i]);
+        if (eccentricity < 3)
+        {
+            drawContours(tmp, contours, i, Scalar(255), 1);
+        }
+    }
+    proc_matrix = tmp;
+
     // Highlight regions of interest on 4 threads
     int cx = proc_matrix.cols/2;
     int cy = proc_matrix.rows/2;
@@ -464,6 +475,29 @@ void processSection(Mat proc_matrix, map<pair<int,int>, int > *top_left_points_o
 
 void strengthenClusters(map<pair<int,int>, int > *top_left_points_of_interest)
 {
+    // int strengthen_range = 3 * SQUARE_SIZE;
+    // for (auto point = top_left_points_of_interest->begin(); point != top_left_points_of_interest->end(); ++point)
+    // {
+    //     for (int i = -strengthen_range; i <= strengthen_range; i += strengthen_range)
+    //     {
+    //         for (int j = -strengthen_range; j <= strengthen_range; j += strengthen_range)
+    //         {
+    //             if (i == 0 && j == 0)
+    //                 continue;
+    //
+    //             int x = point->first.first,
+    //                 y = point->first.second;
+    //             pair<int,int> tmp = {x + i, y + j};
+    //             auto other_point = top_left_points_of_interest->find(tmp);
+    //             if (other_point != top_left_points_of_interest->end())
+    //             {
+    //                 // Add this POI's weighting to the current one
+    //                 point->second += other_point->second;
+    //             }
+    //         }
+    //     }
+    // }
+
     // Increase the weighting of each POI in inverse proportion to its distance
     // from other POIs
     for (auto point = top_left_points_of_interest->begin(); point != top_left_points_of_interest->end(); ++point)
@@ -501,7 +535,7 @@ void trimPointsOfInterest(map<pair<int,int>, int > *top_left_points_of_interest,
     }
 
     // Determine the threshold
-    int threshold_index = 0.3*point_weightings->size();
+    int threshold_index = 0.6*point_weightings->size();
     nth_element(point_weightings->begin(), point_weightings->begin() + threshold_index, point_weightings->end());
     int threshold = *(point_weightings->begin() + threshold_index);
 
