@@ -366,6 +366,10 @@ void findRegionsOfInterest(Mat proc_matrix, map<pair<int,int>, int > *top_left_p
     Mat tmp = Mat::zeros(proc_matrix.size(), proc_matrix.type());
     for (int i = 0; i != contours.size(); ++i)
     {
+        // Remove contours with too few points to be a person
+        // Any fewer than 5 points can't be fit with an ellipse
+        if (contours[i].size() < 5)
+            continue;
         RotatedRect bounding_ellipse = fitEllipse(contours[i]);
         double eccentricity = max(bounding_ellipse.size.height / bounding_ellipse.size.width,
                                   bounding_ellipse.size.width / bounding_ellipse.size.height);
